@@ -1,0 +1,133 @@
+name: fetch-history
+# テーマの答え合わせ用に、過去約13年の日次終値を一度だけ取得する（手動実行のみ）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-prices
+  cancel-in-progress: false
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas
+      - name: fetch
+        shell: python
+        run: |
+          import csv, io
+          from pathlib import Path
+          import pandas as pd, yfinance as yf
+          PAST = """code,name,group
+          8035,東京エレクトロン,過去:半導体
+          6857,アドバンテスト,過去:半導体
+          6920,レーザーテック,過去:半導体
+          6146,ディスコ,過去:半導体
+          7735,SCREEN HD,過去:半導体
+          6323,ローツェ,過去:半導体
+          6315,TOWA,過去:半導体
+          4062,イビデン,過去:半導体
+          2158,FRONTEO,過去:AI
+          3655,ブレインパッド,過去:AI
+          4382,HEROZ,過去:AI
+          3984,ユーザーローカル,過去:AI
+          4488,AI inside,過去:AI
+          3993,PKSHA Technology,過去:AI
+          3681,ブイキューブ,過去:テレワーク
+          4478,フリー,過去:テレワーク
+          3923,ラクス,過去:テレワーク
+          4443,Sansan,過去:テレワーク
+          4384,ラクスル,過去:テレワーク
+          3604,川本産業,過去:コロナ
+          7963,興研,過去:コロナ
+          4563,アンジェス,過去:コロナ
+          6754,アンリツ,過去:5G
+          6701,NEC,過去:5G
+          6779,日本電波工業,過去:5G
+          6703,沖電気工業,過去:5G
+          4080,田中化学研究所,過去:EV電池
+          4100,戸田工業,過去:EV電池
+          6619,ダブル・スコープ,過去:EV電池
+          6810,マクセル,過去:EV電池
+          4109,ステラ ケミファ,過去:EV電池
+          6013,タクマ,過去:脱炭素
+          6366,千代田化工建設,過去:脱炭素
+          6330,東洋エンジニアリング,過去:脱炭素
+          1407,ウエストHD,過去:脱炭素
+          9517,イーレックス,過去:脱炭素
+          3099,三越伊勢丹HD,過去:インバウンド
+          8233,高島屋,過去:インバウンド
+          9603,エイチ・アイ・エス,過去:インバウンド
+          2222,寿スピリッツ,過去:インバウンド
+          4911,資生堂,過去:インバウンド
+          7011,三菱重工業,過去:防衛
+          7012,川崎重工業,過去:防衛
+          7013,IHI,過去:防衛
+          6203,豊和工業,過去:防衛
+          8058,三菱商事,過去:商社
+          8031,三井物産,過去:商社
+          8001,伊藤忠商事,過去:商社
+          8053,住友商事,過去:商社
+          8002,丸紅,過去:商社
+          8411,みずほFG,過去:銀行
+          8308,りそなHD,過去:銀行
+          6504,富士電機,過去:電力設備
+          6501,日立製作所,過去:電力設備
+          6508,明電舎,過去:電力設備
+          6622,ダイヘン,過去:電力設備
+          6954,ファナック,過去:ロボット
+          6506,安川電機,過去:ロボット
+          6481,THK,過去:ロボット
+          4704,トレンドマイクロ,過去:セキュリティ
+          3857,ラック,過去:セキュリティ
+          5801,古河電気工業,過去:光通信
+          1963,日揮HD,過去:原子力
+          9501,東京電力HD,過去:原子力
+          """
+          rows = list(csv.DictReader(io.StringIO("\n".join(l.strip() for l in PAST.strip().splitlines()))))
+          with open("tickers.csv", encoding="utf-8") as f:
+              rows += [r for r in csv.DictReader(f) if r.get("code")]
+          seen, uni = set(), []
+          for r in rows:
+              if r["code"] not in seen:
+                  seen.add(r["code"]); uni.append(r)
+          sym = lambda c: c if c.startswith("^") else f"{c}.T"
+          symbols = [sym(r["code"]) for r in uni]
+          df = yf.download(symbols, start="2013-01-01", interval="1d", auto_adjust=True,
+                           group_by="ticker", threads=True, progress=False)
+          out = Path("data/history"); out.mkdir(parents=True, exist_ok=True)
+          parts, ok = [], 0
+          for r, s in zip(uni, symbols):
+              try:
+                  c = df[s]["Close"].dropna()
+              except KeyError:
+                  continue
+              c = c[c > 0]
+              med = c.rolling(9, center=True, min_periods=1).median()
+              c = c[(c / med).between(0.6, 1.6)]
+              if len(c) < 30:
+                  continue
+              ok += 1
+              parts.append(pd.DataFrame({"date": c.index.strftime("%Y-%m-%d"), "code": r["code"], "close": c.round(2).values}))
+          pd.concat(parts).to_csv(out / "daily.csv.gz", index=False, compression="gzip")
+          with open(out / "universe.csv", "w", newline="", encoding="utf-8") as f:
+              w = csv.DictWriter(f, fieldnames=["code", "name", "group"]); w.writeheader()
+              for r in uni:
+                  w.writerow({k: r[k] for k in ("code", "name", "group")})
+          print(f"ok={ok} / {len(uni)}")
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/history/
+          git diff --cached --quiet && exit 0
+          git commit -m "history $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
