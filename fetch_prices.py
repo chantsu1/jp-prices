@@ -37,6 +37,10 @@ def fetch(symbols):
         try:
             sub = df[s] if isinstance(df.columns, pd.MultiIndex) else df
             c = sub["Close"].dropna()
+            c = c[c > 0]
+            # Yahoo のデータにまれに混じる一時的な異常値（株式分割の反映漏れなど）を取り除く
+            med = c.rolling(9, center=True, min_periods=1).median()
+            c = c[(c / med).between(0.6, 1.6)]
             if len(c):
                 closes[s] = c
         except KeyError:
