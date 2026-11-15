@@ -1,6 +1,6 @@
 name: build-universe
 # テクニカルの合図を探す銘柄を増やす（手動実行のみ）。
-# 東証の銘柄から「売買代金が1日5千万円以上・100株が100万円以下」の銘柄を最大700選び、
+# 東証の銘柄（ETF・REITを除く）から「売買代金が1日5千万円以上・100株が100万円以下」の銘柄を最大700選び、
 # tickers.csv に group=スキャン として追加する（テーマの銘柄はそのまま残す）
 on:
   workflow_dispatch: {}
@@ -28,27 +28,29 @@ jobs:
           import pandas as pd, requests, yfinance as yf
           rows = [r for r in csv.DictReader(open("tickers.csv", encoding="utf-8")) if r.get("code") and r["group"] != "スキャン"]
           keep = {r["code"] for r in rows}
+          import re, json
           names = {}
-          for url in ("https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls",
-                      "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls"):
-              try:
-                  r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-                  print(url, r.status_code, r.headers.get("content-type"), len(r.content))
-                  x = pd.read_excel(io.BytesIO(r.content), dtype=str)
-                  mk = [c for c in x.columns if "市場" in c or "Market" in c][0]; nm = [c for c in x.columns if "銘柄名" in c or "Name" in c][0]; cd = [c for c in x.columns if "コード" in c or "Code" in c][0]
-                  x = x[x[mk].str.contains("内国株式|Domestic", na=False)]
-                  names = dict(zip(x[cd], x[nm])); print("list ok", len(names)); break
-              except Exception as e:
-                  print("list failed", url, e)
+          bad = re.compile(r"ETF|ＥＴＦ|ETN|ＥＴＮ|上場投信|投資法人|投資信託|受益証券|上場信託|Tracers|連動型|ファンド|ＦＵＮＤＳ|FUNDS|インデックス|指数|ＮＥＸＴ|iShares|ｉシェアーズ|ＩＮＤＥＸ|MAXIS|ＭＡＸＩＳ|SPDR|ＳＰＤＲ|ベア|ブル|レバレッジ|インバース|ダブル")
+          try:
+              js = requests.get("https://raw.githubusercontent.com/umihico/kabu-json-all-stock-list/master/all_stocks.json", timeout=60).json()
+              names = {r["コード"]: r["銘柄名"] for r in js if re.fullmatch(r"\d{4}", r["コード"]) and not bad.search(r["銘柄名"])}
+              print("list ok", len(names))
+          except Exception as e:
+              print("list failed", e)
           cand = sorted(names) if names else [str(c) for c in range(1301, 10000)]
           cand = [c for c in cand if c not in keep]
           stat = {}
           for i in range(0, len(cand), 200):
               ch = [f"{c}.T" for c in cand[i:i + 200]]
-              try:
-                  q = yf.download(ch, period="3mo", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
-              except Exception as e:
-                  print("err", e); continue
+              q = None
+              for attempt in range(3):
+                  try:
+                      q = yf.download(ch, period="3mo", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
+                      if q is not None and len(q): break
+                  except Exception as e:
+                      print("err", e)
+                  time.sleep(15)
+              if q is None or not len(q): continue
               for s in ch:
                   try:
                       d = q[s].dropna()
@@ -63,13 +65,13 @@ jobs:
           out = []
           for c in pick:
               nm = names.get(c)
-              if not nm:
+              if not nm and not names:
                   try:
                       inf = yf.Ticker(f"{c}.T").info; nm = inf.get("shortName") or inf.get("longName") or c
                   except Exception:
                       nm = c
                   time.sleep(0.3)
-              out.append({"code": c, "name": str(nm).replace(",", " "), "group": "スキャン"})
+              out.append({"code": c, "name": str(nm or c).replace(",", " "), "group": "スキャン"})
           with open("tickers.csv", "w", newline="", encoding="utf-8") as f:
               w = csv.DictWriter(f, fieldnames=["code", "name", "group"]); w.writeheader()
               for r in rows: w.writerow({k: r[k] for k in ("code", "name", "group")})
