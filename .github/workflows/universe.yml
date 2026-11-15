@@ -12,7 +12,7 @@ concurrency:
 jobs:
   universe:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,9 +39,10 @@ jobs:
               print("list failed", e)
           cand = sorted(names) if names else [str(c) for c in range(1301, 10000)]
           cand = [c for c in cand if c not in keep]
+          import random; random.seed(7); random.shuffle(cand)  # 失敗が特定のコード帯に偏らないよう順番を混ぜる
           stat = {}
-          for i in range(0, len(cand), 200):
-              ch = [f"{c}.T" for c in cand[i:i + 200]]
+          for i in range(0, len(cand), 100):
+              ch = [f"{c}.T" for c in cand[i:i + 100]]
               q = None
               for attempt in range(3):
                   try:
@@ -58,7 +59,7 @@ jobs:
                       continue
                   if len(d) < 40: continue
                   stat[s[:-2]] = ((d["Close"] * d["Volume"]).median(), d["Close"].iloc[-1])
-              print(i, len(stat)); time.sleep(2)
+              print(i, len(stat)); time.sleep(6)
           pick = [c for c, (tv, px) in stat.items() if tv >= 5e7 and px * 100 <= 1_000_000]
           pick = sorted(pick, key=lambda c: -stat[c][0])[:700]
           print("picked", len(pick))
