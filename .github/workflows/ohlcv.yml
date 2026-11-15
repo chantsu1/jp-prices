@@ -45,6 +45,28 @@ jobs:
               print("JPX list ok", len(x))
           except Exception as e:
               print("JPX list failed:", e)
+          if not any(u["src"] == "random" for u in uni):
+              # 一覧が取れないときは、4桁コードを無作為に試して、実在する銘柄を集める
+              have = {u["code"] for u in uni}
+              random.seed(42)
+              cand = [str(c) for c in random.sample(range(1301, 9999), 3000) if str(c) not in have]
+              found = []
+              for i in range(0, len(cand), 150):
+                  ch = [f"{c}.T" for c in cand[i:i + 150]]
+                  try:
+                      q = yf.download(ch, period="1mo", interval="1d", group_by="ticker", threads=True, progress=False)
+                  except Exception:
+                      continue
+                  for s in ch:
+                      try:
+                          if q[s]["Close"].dropna().shape[0] >= 5: found.append(s[:-2])
+                      except KeyError:
+                          pass
+                  print("probe", i, len(found))
+                  if len(found) >= 700: break
+                  time.sleep(2)
+              for c in found[:700]:
+                  uni.append({"code": c, "name": "", "market": "", "sector": "", "size": "", "src": "random"})
           syms = [f"{u['code']}.T" for u in uni]
           parts = []
           for i in range(0, len(syms), 80):
