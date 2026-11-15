@@ -1,0 +1,84 @@
+name: fetch-ohlcv
+# テクニカル検証用：東証の全上場銘柄から無作為に約700銘柄＋tickers.csv の銘柄について、
+# 2013年からの日足（始値・高値・安値・終値・出来高）を一度だけ取得する（手動実行のみ）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-prices
+  cancel-in-progress: false
+jobs:
+  ohlcv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas xlrd requests
+      - name: fetch
+        shell: python
+        run: |
+          import csv, io, random, time
+          from pathlib import Path
+          import pandas as pd, requests, yfinance as yf
+          out = Path("data/ohlcv"); out.mkdir(parents=True, exist_ok=True)
+          base = list(csv.DictReader(open("tickers.csv", encoding="utf-8")))
+          uni = [{"code": r["code"], "name": r["name"], "market": "", "sector": "", "size": "", "src": "tickers"} for r in base if not r["code"].startswith("^")]
+          try:
+              url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+              x = pd.read_excel(io.BytesIO(requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"}).content), dtype=str)
+              x = x[x["市場・商品区分"].str.contains("内国株式", na=False)]
+              have = {u["code"] for u in uni}
+              pool = [r for _, r in x.iterrows() if r["コード"] not in have]
+              random.seed(42)
+              for r in random.sample(pool, min(700, len(pool))):
+                  uni.append({"code": r["コード"], "name": r["銘柄名"], "market": r["市場・商品区分"], "sector": r["33業種区分"], "size": r["規模区分"], "src": "random"})
+              info = {r["コード"]: r for _, r in x.iterrows()}
+              for u in uni:
+                  if u["src"] == "tickers" and u["code"] in info:
+                      r = info[u["code"]]; u["market"], u["sector"], u["size"] = r["市場・商品区分"], r["33業種区分"], r["規模区分"]
+              print("JPX list ok", len(x))
+          except Exception as e:
+              print("JPX list failed:", e)
+          syms = [f"{u['code']}.T" for u in uni]
+          parts = []
+          for i in range(0, len(syms), 80):
+              chunk = syms[i:i + 80]
+              df = yf.download(chunk, start="2013-01-01", interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
+              for s in chunk:
+                  try:
+                      sub = df[s][["Open", "High", "Low", "Close", "Volume"]].dropna()
+                  except KeyError:
+                      continue
+                  sub = sub[sub["Close"] > 0]
+                  med = sub["Close"].rolling(9, center=True, min_periods=1).median()
+                  sub = sub[(sub["Close"] / med).between(0.6, 1.6)]
+                  if len(sub) < 60:
+                      continue
+                  sub = sub.round(2); sub["Volume"] = sub["Volume"].astype("int64")
+                  sub.insert(0, "code", s[:-2]); sub.index = sub.index.strftime("%Y-%m-%d")
+                  parts.append(sub)
+              print(i, len(parts)); time.sleep(3)
+          allp = pd.concat(parts); allp.index.name = "date"
+          allp.columns = ["code", "open", "high", "low", "close", "volume"]
+          allp.to_csv(out / "daily.csv.gz", compression="gzip")
+          ok = set(allp["code"])
+          with open(out / "universe.csv", "w", newline="", encoding="utf-8") as f:
+              w = csv.DictWriter(f, fieldnames=["code", "name", "market", "sector", "size", "src"]); w.writeheader()
+              for u in uni:
+                  if u["code"] in ok: w.writerow(u)
+          print("done", len(ok), "/", len(uni))
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/ohlcv/
+          git diff --cached --quiet && exit 0
+          git commit -m "ohlcv $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
