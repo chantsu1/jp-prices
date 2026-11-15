@@ -1,0 +1,86 @@
+name: build-universe
+# テクニカルの合図を探す銘柄を増やす（手動実行のみ）。
+# 東証の銘柄から「売買代金が1日5千万円以上・100株が100万円以下」の銘柄を最大700選び、
+# tickers.csv に group=スキャン として追加する（テーマの銘柄はそのまま残す）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-prices
+  cancel-in-progress: false
+jobs:
+  universe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas xlrd openpyxl requests
+      - name: build
+        shell: python
+        run: |
+          import csv, io, time
+          import pandas as pd, requests, yfinance as yf
+          rows = [r for r in csv.DictReader(open("tickers.csv", encoding="utf-8")) if r.get("code") and r["group"] != "スキャン"]
+          keep = {r["code"] for r in rows}
+          names = {}
+          for url in ("https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls",
+                      "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls"):
+              try:
+                  r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+                  print(url, r.status_code, r.headers.get("content-type"), len(r.content))
+                  x = pd.read_excel(io.BytesIO(r.content), dtype=str)
+                  mk = [c for c in x.columns if "市場" in c or "Market" in c][0]; nm = [c for c in x.columns if "銘柄名" in c or "Name" in c][0]; cd = [c for c in x.columns if "コード" in c or "Code" in c][0]
+                  x = x[x[mk].str.contains("内国株式|Domestic", na=False)]
+                  names = dict(zip(x[cd], x[nm])); print("list ok", len(names)); break
+              except Exception as e:
+                  print("list failed", url, e)
+          cand = sorted(names) if names else [str(c) for c in range(1301, 10000)]
+          cand = [c for c in cand if c not in keep]
+          stat = {}
+          for i in range(0, len(cand), 200):
+              ch = [f"{c}.T" for c in cand[i:i + 200]]
+              try:
+                  q = yf.download(ch, period="3mo", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
+              except Exception as e:
+                  print("err", e); continue
+              for s in ch:
+                  try:
+                      d = q[s].dropna()
+                  except KeyError:
+                      continue
+                  if len(d) < 40: continue
+                  stat[s[:-2]] = ((d["Close"] * d["Volume"]).median(), d["Close"].iloc[-1])
+              print(i, len(stat)); time.sleep(2)
+          pick = [c for c, (tv, px) in stat.items() if tv >= 5e7 and px * 100 <= 1_000_000]
+          pick = sorted(pick, key=lambda c: -stat[c][0])[:700]
+          print("picked", len(pick))
+          out = []
+          for c in pick:
+              nm = names.get(c)
+              if not nm:
+                  try:
+                      inf = yf.Ticker(f"{c}.T").info; nm = inf.get("shortName") or inf.get("longName") or c
+                  except Exception:
+                      nm = c
+                  time.sleep(0.3)
+              out.append({"code": c, "name": str(nm).replace(",", " "), "group": "スキャン"})
+          with open("tickers.csv", "w", newline="", encoding="utf-8") as f:
+              w = csv.DictWriter(f, fieldnames=["code", "name", "group"]); w.writeheader()
+              for r in rows: w.writerow({k: r[k] for k in ("code", "name", "group")})
+              for r in out: w.writerow(r)
+          print("tickers.csv rows", len(rows) + len(out))
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add tickers.csv
+          git diff --cached --quiet && exit 0
+          git commit -m "universe $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
