@@ -1,8 +1,13 @@
 name: fetch-prices
 on:
   schedule:
-    - cron: "40 8 * * 1-5"   # 平日 17:40 JST（UTC 8:40）
-  workflow_dispatch: {}       # 手動実行ボタン
+    # GitHub の定時実行は遅れたり飛ばされたりすることがあるので、平日の夜に4回走らせる
+    # （同じ内容なら記録しないので、何回走っても問題ない）
+    - cron: "40 8 * * 1-5"    # 17:40 JST
+    - cron: "10 10 * * 1-5"   # 19:10 JST
+    - cron: "20 12 * * 1-5"   # 21:20 JST
+    - cron: "30 14 * * 1-5"   # 23:30 JST
+  workflow_dispatch: {}        # 手動実行ボタン
 permissions:
   contents: write
 concurrency:
@@ -11,7 +16,7 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,13 +25,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install yfinance pandas
-      - run: python fetch_prices.py
+      - name: fetch (失敗したら1分おいてもう一度)
+        run: python fetch_prices.py || (sleep 60 && python fetch_prices.py)
       - name: commit
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add data/
+          git add data/metrics.csv data/prices.csv
           git diff --cached --quiet && exit 0
-          git commit -m "prices $(date -u +%F)"
+          git add data/updated.txt
+          git commit -m "prices $(TZ=Asia/Tokyo date +%F)"
           git pull --rebase origin main
           git push origin HEAD:main
