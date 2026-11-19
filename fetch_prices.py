@@ -3,6 +3,8 @@
 出力:
   data/metrics.csv  銘柄ごとの最新値と指標（上昇率・高値からの距離・移動平均など）
   data/prices.csv   直近約300営業日の終値（縦持ち: date,code,close）
+  data/ohlc.csv.gz  直近約120営業日の始値・高値・安値・終値・出来高（date,code,open,high,low,close,volume）
+  data/global.csv   米国ETF・資源・金利などの直近約300営業日の終値（date,symbol,close）
   data/updated.txt  更新日時と取得結果の要約
 """
 import csv
@@ -15,6 +17,8 @@ import pandas as pd
 import yfinance as yf
 
 ROOT = Path(__file__).resolve().parent
+OHLC = {}  # code ごとの始値・高値・安値・終値・出来高（fetch が埋める）
+GLOBAL = ["SPY", "QQQ", "SOXX", "XLE", "XLF", "XLK", "^SOX", "^VIX", "^TNX", "CL=F", "HG=F", "GC=F", "DX-Y.NYB", "JPY=X"]
 DATA = ROOT / "data"
 BENCH = "1306"  # 市場全体の基準（TOPIX連動ETF）
 
@@ -43,6 +47,11 @@ def fetch(symbols):
             c = c[(c / med).between(0.6, 1.6)]
             if len(c):
                 closes[s] = c
+                try:
+                    o = sub[["Open", "High", "Low", "Close", "Volume"]].loc[c.index]
+                    OHLC[s] = o
+                except Exception:
+                    pass
         except KeyError:
             pass
     return closes
@@ -83,6 +92,34 @@ def metrics(c: pd.Series, bench: pd.Series | None):
     return m
 
 
+def write_extra(tickers, symbols):
+    """始値・高値・安値・出来高と、米国ETF・資源などの終値。失敗しても本体の出力には影響させない。"""
+    try:
+        rows = []
+        for t, s in zip(tickers, symbols):
+            o = OHLC.get(s)
+            if o is None:
+                continue
+            for d, v in o.iloc[-120:].iterrows():
+                rows.append([d.strftime("%Y-%m-%d"), t["code"], round(float(v["Open"]), 2), round(float(v["High"]), 2),
+                             round(float(v["Low"]), 2), round(float(v["Close"]), 2), int(v["Volume"]) if v["Volume"] == v["Volume"] else 0])
+        pd.DataFrame(rows, columns=["date", "code", "open", "high", "low", "close", "volume"]).to_csv(
+            DATA / "ohlc.csv.gz", index=False, compression="gzip")
+        print("ohlc rows", len(rows))
+    except Exception as e:
+        print("ohlc failed:", e)
+    try:
+        g = fetch(GLOBAL)
+        rows = []
+        for s, c in g.items():
+            for d, v in c.iloc[-300:].items():
+                rows.append([d.strftime("%Y-%m-%d"), s, round(float(v), 4)])
+        pd.DataFrame(rows, columns=["date", "symbol", "close"]).to_csv(DATA / "global.csv", index=False)
+        print("global rows", len(rows), "symbols", len(g))
+    except Exception as e:
+        print("global failed:", e)
+
+
 def main():
     tickers = load_tickers()
     symbols = [to_yahoo(t["code"]) for t in tickers]
@@ -116,6 +153,7 @@ def main():
                 continue
             for d, v in c.iloc[-300:].items():
                 w.writerow([d.strftime("%Y-%m-%d"), t["code"], round(float(v), 2)])
+    write_extra(tickers, symbols)
     now = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M JST")
     (DATA / "updated.txt").write_text(f"{now} 取得成功 {ok} / 失敗 {ng}\n", encoding="utf-8")
     print(f"done ok={ok} ng={ng}")
