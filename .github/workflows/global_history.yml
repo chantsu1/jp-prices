@@ -1,0 +1,50 @@
+name: fetch-global-history
+# 先行指標の検証用：米国ETF・資源・金利などの2013年からの日足終値を一度だけ取得する（手動実行のみ）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-global
+  cancel-in-progress: false
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas
+      - name: fetch
+        shell: python
+        run: |
+          from pathlib import Path
+          import pandas as pd, yfinance as yf
+          syms = ["SPY", "QQQ", "SOXX", "XLE", "XLF", "XLK", "XLU", "XLB", "XLI", "XLV", "^SOX", "^VIX", "^TNX", "CL=F", "HG=F", "GC=F", "DX-Y.NYB", "JPY=X", "^GSPC", "^IXIC"]
+          out = Path("data/global"); out.mkdir(parents=True, exist_ok=True)
+          df = yf.download(syms, start="2013-01-01", interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
+          rows = []
+          for s in syms:
+              try:
+                  c = df[s]["Close"].dropna()
+              except KeyError:
+                  print("missing", s); continue
+              c = c[c > 0]
+              for d, v in c.items():
+                  rows.append((d.strftime("%Y-%m-%d"), s, round(float(v), 4)))
+          g = pd.DataFrame(rows, columns=["date", "symbol", "close"])
+          g.to_csv(out / "history.csv.gz", index=False, compression="gzip")
+          print("done", g.symbol.nunique(), len(g))
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/global/
+          git diff --cached --quiet && exit 0
+          git commit -m "global history $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
