@@ -1,0 +1,55 @@
+name: fetch-wikiviews
+# 注目の予兆の検証用：日本語版Wikipediaの日別閲覧数(人による閲覧のみ)を取得する(手動実行のみ)
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-wikiviews
+  cancel-in-progress: false
+jobs:
+  wiki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: fetch
+        shell: python
+        run: |
+          import json, time, urllib.request, urllib.parse
+          from pathlib import Path
+          out = Path("data/wiki"); out.mkdir(parents=True, exist_ok=True)
+          titles = ["生成的人工知能", "半導体", "電気自動車", "全固体電池", "デジタルトランスフォーメーション",
+                    "インバウンド", "コンピュータセキュリティ", "データセンター", "ヒューマノイドロボット",
+                    "光通信", "原子力発電", "水素エネルギー", "防衛費", "量子コンピュータ", "核融合反応",
+                    "日経平均株価", "円安", "NISA", "高市早苗", "エヌビディア"]
+          UA = {"User-Agent": "jp-prices-research/1.0 (personal research; github.com/chantsu1/jp-prices)"}
+          rows, failed = [], []
+          for t in titles:
+              u = ("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/ja.wikipedia/all-access/user/"
+                   + urllib.parse.quote(t.replace(" ", "_"), safe="") + "/daily/20190101/20261120")
+              ok = False
+              for a in range(3):
+                  try:
+                      d = json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=60).read())
+                      for it in d["items"]:
+                          rows.append(f'{it["timestamp"][:8]},{t},{it["views"]}')
+                      ok = True; print("ok", t, len(d["items"])); break
+                  except Exception as e:
+                      print("retry", t, a, str(e)[:80]); time.sleep(5 * (a + 1))
+              if not ok: failed.append(t)
+              time.sleep(1)
+          (out / "wiki.csv").write_text("date,title,views\n" + "\n".join(rows), encoding="utf-8")
+          (out / "failed.txt").write_text("\n".join(failed), encoding="utf-8")
+          print("done", len(rows), "failed", failed)
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/wiki/
+          git diff --cached --quiet && exit 0
+          git commit -m "wikiviews $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main

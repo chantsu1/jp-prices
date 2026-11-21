@@ -1,0 +1,60 @@
+name: jpx-snapshot
+# 決算発表予定日(JPX)と信用取引現在高(JPX)を、見つけたExcelごと日付つきで保存する。
+# 過去分が公開されていないので、毎週ためて、後から検証できるようにする。
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "30 22 * * 5"   # 毎週土曜 07:30 JST
+permissions:
+  contents: write
+concurrency:
+  group: jpx-snapshot
+  cancel-in-progress: false
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: fetch
+        shell: python
+        run: |
+          import re, datetime, urllib.request, urllib.parse
+          from pathlib import Path
+          UA = {"User-Agent": "Mozilla/5.0"}
+          def get(u):
+              return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=60).read()
+          today = datetime.date.today().isoformat()
+          out = Path("data/jpx") / today
+          out.mkdir(parents=True, exist_ok=True)
+          pages = {
+            "earnings": "https://www.jpx.co.jp/listing/event-schedules/financial-announcement/index.html",
+            "margin": "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html",
+          }
+          for tag, page in pages.items():
+              try:
+                  html = get(page).decode("utf-8", "ignore")
+              except Exception as e:
+                  print("page fail", tag, e); continue
+              links = sorted(set(re.findall(r'href="([^"]+\.xlsx?)"', html)))
+              if tag == "margin":   # 最新の現在高のみ(古い日付別ファイルは大量なので除く)
+                  links = [l for l in links if "tvdivq" in l] or links[:2]
+              print(tag, links)
+              for l in links:
+                  u = urllib.parse.urljoin(page, l)
+                  name = tag + "_" + u.rsplit("/", 1)[-1]
+                  try:
+                      (out / name).write_bytes(get(u)); print("saved", name)
+                  except Exception as e:
+                      print("fail", name, e)
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/jpx/
+          git diff --cached --quiet && exit 0
+          git commit -m "jpx snapshot $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
