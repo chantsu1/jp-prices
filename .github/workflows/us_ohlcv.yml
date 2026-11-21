@@ -1,0 +1,71 @@
+name: fetch-us-ohlcv
+# 米国株での再現確認用：米国上場の普通株を無作為に約700銘柄＋SPYで、2013年からの日足を一度だけ取得する（手動実行のみ）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-us
+  cancel-in-progress: false
+jobs:
+  us:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas requests
+      - name: fetch
+        shell: python
+        run: |
+          import io, random, time
+          from pathlib import Path
+          import pandas as pd, requests, yfinance as yf
+          out = Path("data/us"); out.mkdir(parents=True, exist_ok=True)
+          def get(u):
+              return pd.read_csv(io.StringIO(requests.get(u, timeout=60).text), sep="|", dtype=str)
+          a = get("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt")
+          b = get("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt")
+          a = a[(a["ETF"] == "N") & (a["Test Issue"] == "N")].rename(columns={"Symbol": "sym"})
+          b = b[(b["ETF"] == "N") & (b["Test Issue"] == "N")].rename(columns={"ACT Symbol": "sym"})
+          syms = pd.concat([a["sym"], b["sym"]]).dropna().astype(str)
+          syms = [s for s in syms if s.isalpha() and len(s) <= 5]
+          random.seed(42)
+          pick = random.sample(syms, 1100)
+          pick = ["SPY"] + [s for s in pick if s != "SPY"]
+          parts = []
+          for i in range(0, len(pick), 80):
+              chunk = pick[i:i + 80]
+              df = yf.download(chunk, start="2013-01-01", interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
+              for s in chunk:
+                  try:
+                      sub = df[s][["Open", "High", "Low", "Close", "Volume"]].dropna()
+                  except KeyError:
+                      continue
+                  sub = sub[sub["Close"] > 0]
+                  if s != "SPY" and (len(sub) < 500 or sub["Close"].median() < 3):
+                      continue
+                  med = sub["Close"].rolling(9, center=True, min_periods=1).median()
+                  sub = sub[(sub["Close"] / med).between(0.6, 1.6)]
+                  sub = sub.round(4); sub["Volume"] = sub["Volume"].astype("int64")
+                  sub.insert(0, "code", s); sub.index = sub.index.strftime("%Y-%m-%d")
+                  parts.append(sub)
+              print(i, len(parts)); time.sleep(3)
+              if sum(1 for p in parts if p["code"].iloc[0] != "SPY") >= 700: break
+          allp = pd.concat(parts); allp.index.name = "date"
+          allp.columns = ["code", "open", "high", "low", "close", "volume"]
+          allp.to_csv(out / "daily.csv.gz", compression="gzip")
+          print("done", allp["code"].nunique())
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/us/
+          git diff --cached --quiet && exit 0
+          git commit -m "us ohlcv $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
