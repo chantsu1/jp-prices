@@ -54,11 +54,56 @@ jobs:
                       (out / name).write_bytes(get(u)); print("saved", name)
                   except Exception as e:
                       print("fail", name, e)
+      - name: parse daily margin
+        run: |
+          sudo apt-get install -y poppler-utils > /dev/null
+          cat > /tmp/parse_margin.py <<'PY'
+          import re, subprocess, sys, csv
+          from pathlib import Path
+          def parse(pdf):
+              txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True).stdout
+              m = re.search(r"As of (\d{4})/(\d{2})/(\d{2})", txt)
+              date = f"{m[1]}-{m[2]}-{m[3]}" if m else None
+              rec = {}
+              for line in txt.splitlines():
+                  m = re.search(r"\b(\d{4}[0-9A-Z])\s+JP\w+\s+(株数 Shs\.|金額 Val\.)\s+(.*)", line)
+                  if not m: continue
+                  code5, kind, rest = m.groups()
+                  t = rest.replace("▲ ", "▲").split()
+                  if len(t) < 4: continue
+                  num = lambda s: int(s.replace(",", "").replace("▲", "-")) if re.fullmatch(r"▲?[\d,]+", s) else None
+                  d = rec.setdefault(code5[:4], {})
+                  k = "shs" if kind.startswith("株数") else "val"
+                  d["sell_" + k] = num(t[0]); d["buy_" + k] = num(t[3])
+              return date, rec
+          if __name__ == "__main__":
+              out = Path(sys.argv[1]); pdfs = sys.argv[2:]
+              seen = set()
+              if out.exists():
+                  seen = {r["date"] for r in csv.DictReader(out.open(encoding="utf-8"))}
+              new = not out.exists()
+              out.parent.mkdir(parents=True, exist_ok=True)
+              with out.open("a", encoding="utf-8", newline="") as f:
+                  w = csv.writer(f)
+                  if new: w.writerow(["date", "code", "sell_shs", "buy_shs", "sell_val", "buy_val"])
+                  for p in sorted(pdfs):
+                      date, rec = parse(p)
+                      if not date or date in seen: continue
+                      for c, d in rec.items():
+                          w.writerow([date, c, d.get("sell_shs"), d.get("buy_shs"), d.get("sell_val"), d.get("buy_val")])
+                      seen.add(date); print("parsed", date, len(rec))
+          PY
+          shopt -s nullglob
+          pdfs=(data/jpx/*/margin_daily_*.pdf)
+          if [ ${#pdfs[@]} -gt 0 ]; then
+            python3 /tmp/parse_margin.py data/margin/stock_daily.csv "${pdfs[@]}"
+            rm -f "${pdfs[@]}"   # 表に直したPDFは容量が大きいので残さない
+          fi
       - name: commit
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add data/jpx/
+          git add data/jpx/ data/margin/
           git diff --cached --quiet && exit 0
           git commit -m "jpx snapshot $(date -u +%F)"
           git pull --rebase origin main
