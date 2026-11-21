@@ -1,0 +1,64 @@
+name: fetch-trends
+# 注目の予兆の検証用：Googleトレンド（日本）の週次の関心度を、約5年分、一度だけ取得する（手動実行のみ）
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fetch-trends
+  cancel-in-progress: false
+jobs:
+  trends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytrends pandas
+      - name: fetch
+        shell: python
+        run: |
+          import random, time
+          from pathlib import Path
+          import pandas as pd
+          from pytrends.request import TrendReq
+          out = Path("data/trends"); out.mkdir(parents=True, exist_ok=True)
+          kws = ["生成AI", "半導体", "電気自動車", "全固体電池", "DX", "インバウンド", "サイバーセキュリティ",
+                 "データセンター", "ヒューマノイド", "光通信", "原子力発電", "水素", "防衛費", "電力 値上げ",
+                 "金利 上昇", "円安", "新NISA", "量子コンピュータ", "核融合", "日経平均"]
+          rows, failed = [], []
+          for k in kws:
+              ok = False
+              for attempt in range(4):
+                  try:
+                      t = TrendReq(hl="ja-JP", tz=-540, timeout=(10, 30))
+                      t.build_payload([k], timeframe="today 5-y", geo="JP")
+                      df = t.interest_over_time()
+                      if df is not None and len(df) and k in df.columns:
+                          for d, v in df[k].items():
+                              rows.append((d.strftime("%Y-%m-%d"), k, int(v)))
+                          ok = True
+                          print("ok", k, len(df))
+                          break
+                  except Exception as e:
+                      print("retry", k, attempt, str(e)[:80])
+                  time.sleep(20 + 20 * attempt)
+              if not ok:
+                  failed.append(k)
+              time.sleep(random.uniform(8, 15))
+          pd.DataFrame(rows, columns=["date", "keyword", "value"]).to_csv(out / "trends.csv", index=False)
+          (out / "failed.txt").write_text("\n".join(failed), encoding="utf-8")
+          print("done rows", len(rows), "failed", failed)
+      - name: commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/trends/
+          git diff --cached --quiet && exit 0
+          git commit -m "trends $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
