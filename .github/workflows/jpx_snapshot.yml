@@ -25,26 +25,31 @@ jobs:
           from pathlib import Path
           UA = {"User-Agent": "Mozilla/5.0"}
           def get(u):
-              return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=60).read()
+              return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=90).read()
           today = datetime.date.today().isoformat()
           out = Path("data/jpx") / today
           out.mkdir(parents=True, exist_ok=True)
+          have = {p.name for p in Path("data/jpx").glob("*/*")}   # 保存済みの同名ファイルは取り直さない
+          base = "https://www.jpx.co.jp"
           pages = {
-            "earnings": "https://www.jpx.co.jp/listing/event-schedules/financial-announcement/index.html",
-            "margin": "https://www.jpx.co.jp/markets/statistics-equities/margin/05.html",
+            "earnings": base + "/listing/event-schedules/financial-announcement/index.html",
+            "margin_total": base + "/markets/statistics-equities/margin/04.html",   # 信用取引現在高(市場全体)
+            "margin_stock_weekly": base + "/markets/statistics-equities/margin/05.html",  # 銘柄別 週末残高(PDF)
+            "margin_daily": base + "/markets/statistics-equities/margin/01.html",   # 日々公表銘柄等 信用取引残高
           }
           for tag, page in pages.items():
               try:
                   html = get(page).decode("utf-8", "ignore")
               except Exception as e:
                   print("page fail", tag, e); continue
-              links = sorted(set(re.findall(r'href="([^"]+\.xlsx?)"', html)))
-              if tag == "margin":   # 最新の現在高のみ(古い日付別ファイルは大量なので除く)
-                  links = [l for l in links if "tvdivq" in l] or links[:2]
-              print(tag, links)
+              links = list(dict.fromkeys(re.findall(r'href="([^"#]+\.(?:xlsx?|pdf))"', html, flags=re.I)))
+              links = [l for l in links if "/att/" in l or "-att/" in l][:20]
+              print(tag, len(links), links[:6])
               for l in links:
                   u = urllib.parse.urljoin(page, l)
                   name = tag + "_" + u.rsplit("/", 1)[-1]
+                  if name in have:
+                      continue
                   try:
                       (out / name).write_bytes(get(u)); print("saved", name)
                   except Exception as e:
